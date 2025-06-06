@@ -123,7 +123,7 @@ if uploaded_file:
 
     st.session_state.setdefault('hero', '')
     if st.button("Generate Hero Prompts"):
-        if product_info['Brand Name'] == "Urbanyog":
+        if product_info['Category'] == "Beauty":
             hero_prompt = f"""
                 Generate a series of 7 hero image prompts for a beauty product, each designed to be a standalone visual in the following sequence.  
                 Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
@@ -141,7 +141,7 @@ if uploaded_file:
 
                 3. Ingredients & Their Use  
                 - Visually showcase key ingredients with small icons or illustrations.  
-                - Briefly mention each ingredient’s benefit.  
+                - Briefly mention each ingredient's benefit.  
                 - Use a soft, inviting color palette.
 
                 4. Science Behind USP  
@@ -149,7 +149,7 @@ if uploaded_file:
                 - Overlay a short, clear explanation of the science behind the USP.
 
                 5. Comparison / Do's and Don'ts  
-                - Create a side-by-side comparison with alternatives or a clear Do’s and Don’ts visual.  
+                - Create a side-by-side comparison with alternatives or a clear Do's and Don'ts visual.  
                 - Use simple icons and minimal text for clarity.
 
                 6. How to Use  
@@ -183,7 +183,7 @@ if uploaded_file:
                 Target: {product_info.get('Target Audience', '')}  
                 Other details: {product_info.get('Other details', '')}
                 """
-        elif product_info['Brand Name'] == "MakeMeeBold":
+        elif product_info['Category'] == "Electronics":
             hero_prompt = f"""
             Generate a series of 7 hero image prompts for an electronics product, each designed to be a standalone visual in the following sequence.  
             Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
@@ -241,7 +241,7 @@ if uploaded_file:
             Other details: {product_info.get('Other details', '')}
             """
         else:
-            hero_prompt = "Category not supported. Please specify 'beauty' or 'electronics' in the product info."
+            hero_prompt = "Category not supported. Please specify 'Beauty' or 'Electronics' in the Category field."
 
         st.session_state['hero'] = generate_section("hero image prompts", hero_prompt)
     text_box("Hero Image Prompts", 'hero', 180)
