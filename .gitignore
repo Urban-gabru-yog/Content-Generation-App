@@ -1,3 +1,20 @@
+# Files and directories to ignore
+
+# Environment files
 .env
+
+# Git-related directories
 .git/
+
+# Virtual Environments
 venv/
+.venv/
+
+# Python compiled files and caches
+__pycache__/
+*.pyc
+
+# Fix for MD, XLSX, and CSV
+*.md
+*.xlsx
+*.csv
