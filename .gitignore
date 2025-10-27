@@ -18,3 +18,5 @@ __pycache__/
 *.md
 *.xlsx
 *.csv
+.devcontainer/
+*.txt

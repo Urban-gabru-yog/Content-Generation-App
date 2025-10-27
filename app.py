@@ -12,6 +12,41 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 st.set_page_config(page_title="Product Listing Automation", layout="wide")
 st.title("📦 Product Listing Automation Tool")
 
+# Brand Tonality Dictionary - Embedded in code
+BRAND_TONALITIES = {
+    "MakeMeeBold": """Confident, not cocky: Customers are sure about our products because they work, not because of overselling.
+Modern & aspirational: Sleek, smart, and relevant to today's beauty consumer — informed but not clinical.
+Empowering: Encourages self-expression, not perfection. The name itself speaks to inner and outer confidence.
+Clean & refined: Language is crisp and minimal, avoiding clutter or fluff.
+Contemporary feminine: It's a women-focused brand, however it is gender-neutral enough to feel inclusive, but still elegant and aspirational.
+Results-oriented: clear about efficacy, with evidence, or focus on USPs""",
+
+    "Urban Yog": """Playful, not pretentious: Skincare is fun and expressive; never boring or overly serious
+Relatable, not preachy: Speaks like a best-friend who gets it - conversational, and easy to connect with
+Bold & unapologetic: owns topics that others avoid such as body hair, acne, etc with confidence, humour and zero shame.
+Yummy & sensory: language is colourful & indulgent - textures, adjectives, scents, and visuals that make skincare feel like a treat 
+Youthful & vibrant: fresh, pop-culture-driven, socially fluent, resonates with Gen Z and young millenials
+Witty & confident: Uses playful quips & puns sometimes, that add spunk & personality without losing meaning or clarity.
+Miniso, cutesy vibes: The brand gives off a miniso-esqe, cutesy vibe""",
+
+    "Urban Gabru": """Confident, not arrogant: Speaks to men who take charge of their lives — ambitious, self-assured, and results-driven.
+Sharp & modern: Sleek, innovative, and tuned to the needs of the contemporary Indian man.
+Empowering & aspirational: Encourages self-improvement and personal growth — grooming is positioned as the start of greatness, not the end goal.
+Practical & purposeful: Clear, direct messaging that communicates product efficacy and everyday relevance — built to support hustle, fitness, and professional ambitions.
+Masculine, yet approachable: Maintains a strong, confident tone without being intimidating — relatable to men from all walks of life.
+Dynamic & motivating: Language inspires action and upward momentum.
+Premium & credible: the brand positions itself as a premium and credible brand with authenticity and trustworthiness.
+To-the-point: Clearly defined USPs and no extra fluff just the way most men communicate.""",
+
+    "Seoulskin": """Calm, not flashy: Focuses on simplicity and serenity, avoiding hype and quick-fix messaging.
+Consistent & reliable: Emphasizes long-term results and daily rituals, positioning the brand as a trustworthy skincare companion.
+Purposeful & minimal: Every product and message is intentional — no clutter, no unnecessary complexity, only what truly benefits the skin.
+Gentle & nurturing: Soft, caring language conveys comfort and reassurance, appealing to those seeking mindful self-care.
+Authentic & credible: Rooted in the principles of Korean skincare, the brand communicates expertise without being clinical or intimidating.
+Sophisticated & understated: Elegant, refined, and approachable — appeals to consumers who value quality and efficacy over trends.
+Mindful & reassuring: Speaks to the desire for slow, consistent care — emphasizing trust, comfort, and skin confidence."""
+}
+
 st.subheader("📥 Upload KLD Sheet")
 uploaded_file = st.file_uploader("Upload your KLD Excel file", type=["xlsx"])
 
@@ -74,6 +109,11 @@ if uploaded_file:
             'KNOW YOUR PRODUCT': get_field('KNOW YOUR PRODUCT', 'Know Your Product', default=''),
             'Net Qty.': get_field('Net Qty.', 'Net Qty', default=''),
             'Country Of Origin': get_field('Country Of Origin', 'Country of Origin', default=''),
+            'Brand Owned & Marketed By': get_field('BRAND OWNED & MARKETED BY', 'Brand Owned & Marketed By', 'Marketed By', default=''),
+            'Email': get_field('EMAIL', 'Email', 'E-mail', default=''),
+            'Contact Us': get_field('CONTACT US', 'Contact Us', 'Contact', default=''),
+            'Box Includes': get_field('BOX INCLUDES', 'Box Includes', 'Box includes', 'What\'s in the box', default=''),
+            'Warranty': get_field('WARRANTY', 'Warranty', 'Warrenty', default=''),
         })
         
         st.success("✅ KLD sheet loaded and parsed successfully!")
@@ -82,6 +122,68 @@ if uploaded_file:
         st.error(f"❌ Error parsing file: {str(e)}")
         st.info("💡 Please ensure your Excel file has 'Particulars' in column D and 'Details' in column E")
         st.stop()
+
+    # Category Selector - Mandatory field
+    st.subheader("📂 Select Product Category")
+    
+    # Try to get category from the file first
+    detected_category = product_info.get('Category', '')
+    
+    # Category selection with radio buttons
+    selected_category = st.radio(
+        "Choose the product category (Required):",
+        options=["Beauty", "Electronics"],
+        index=0 if not detected_category or 'Beauty' in str(detected_category) else 1,
+        horizontal=True,
+        help="This determines which content templates and fields to use"
+    )
+    
+    # Update the product_info with selected category
+    product_info['Category'] = selected_category
+    
+    # Show warning if no category is selected
+    if not selected_category:
+        st.warning("⚠️ Please select a product category to continue")
+        st.stop()
+    
+    st.success(f"✅ Category set to: **{selected_category}**")
+    
+    # Brand Selector - Mandatory field
+    st.subheader("🏷️ Select Brand")
+    
+    # Try to detect brand from the file
+    detected_brand = product_info.get('Brand Name', '')
+    
+    # Get available brands from tonality file
+    available_brands = list(BRAND_TONALITIES.keys()) if BRAND_TONALITIES else []
+    
+    if available_brands:
+        # Try to match detected brand with available brands
+        default_index = 0
+        for idx, brand in enumerate(available_brands):
+            if detected_brand and brand.lower() in detected_brand.lower():
+                default_index = idx
+                break
+        
+        selected_brand = st.selectbox(
+            "Choose the brand (Required):",
+            options=available_brands,
+            index=default_index,
+            help="This determines the tone and style of generated content"
+        )
+        
+        # Show the tonality for selected brand
+        if selected_brand and selected_brand in BRAND_TONALITIES:
+            with st.expander("📖 View Brand Tonality Guidelines", expanded=False):
+                st.markdown(f"**{selected_brand} Tonality:**")
+                st.text(BRAND_TONALITIES[selected_brand])
+        
+        st.success(f"✅ Brand set to: **{selected_brand}**")
+    else:
+        st.warning("⚠️ No brand tonality file found. Content will be generated with generic tone.")
+        selected_brand = None
+    
+    st.markdown("---")
 
     st.subheader("🔹 Product Information")
     
@@ -98,10 +200,17 @@ if uploaded_file:
 
     def generate_section(section_name, instruction):
         try:
+            # Prepare the system message with brand tonality if available
+            system_message = "You are a professional ecommerce copywriter."
+            
+            if selected_brand and selected_brand in BRAND_TONALITIES:
+                brand_tonality = BRAND_TONALITIES[selected_brand]
+                system_message += f"\n\nIMPORTANT - BRAND TONE & VOICE:\nYou are writing for the brand '{selected_brand}'. Follow this brand tonality strictly:\n\n{brand_tonality}\n\nEnsure all content reflects this brand's personality, tone, and style."
+            
             completion = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a professional ecommerce copywriter."},
+                    {"role": "system", "content": system_message},
                     {"role": "user", "content": instruction}
                 ],
                 temperature=0.7
@@ -171,6 +280,12 @@ if uploaded_file:
         shopify_prompt = f"""
             Write a Shopify product description using a friendly, informative tone.
             Include small paragraphs, bullet points, and headings. Length: 1500–2000 characters.
+            
+            IMPORTANT: Do NOT use markdown formatting. Use plain text only.
+            - Do not use ** for bold
+            - Do not use # for headings
+            - Do not use markdown syntax
+            - Use simple text formatting only
 
             Product: {product_info.get('Product Name', 'N/A')}
             Brand: {product_info.get('Brand Name', 'N/A')}
@@ -185,11 +300,15 @@ if uploaded_file:
 
     st.session_state.setdefault('hero', '')
     if st.button("Generate Hero Prompts"):
+        # Use the selected category from the UI
         category = product_info.get('Category', 'Beauty')
-        if category and 'Beauty' in category:
+        
+        if 'Beauty' in str(category):
             hero_prompt = f"""
                 Generate a series of 7 hero image prompts for a beauty product, each designed to be a standalone visual in the following sequence.  
                 Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
+                
+                IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
 
                 1. Hero Image: What does it do / Differentiation / Before-After  
                 - Show the product with a clear before-and-after comparison, highlighting the main benefit or transformation.  
@@ -246,10 +365,12 @@ if uploaded_file:
                 Target: {product_info.get('Target Audience', '')}  
                 Other details: {product_info.get('KNOW YOUR PRODUCT', '')}
                 """
-        elif category and 'Electronics' in category:
+        elif 'Electronics' in str(category):
             hero_prompt = f"""
             Generate a series of 7 hero image prompts for an electronics product, each designed to be a standalone visual in the following sequence.  
             Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
+            
+            IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
 
             1. Hero Image: What does it do / Differentiation / Before-After  
             - Show the product in action or with a before-and-after or comparison visual.  
@@ -329,17 +450,54 @@ if uploaded_file:
     text_box("A+ Image Prompts", 'a_plus', 180)
 
     # Website Content Generation
-    if st.button("🧠 Generate Full Website Content"):
-        full_web_prompt = f"""
+    if st.button("🌐 Generate Full Website Content"):
+        # Use the selected category from the UI
+        category = product_info.get('Category', 'Beauty')
+        is_electronics = 'Electronics' in str(category)
+        
+        # Check if brand is Seoulskin for language preference
+        brand_name = product_info.get('Brand Name', '').strip()
+        is_seoulskin = 'seoulskin' in brand_name.lower()
+        
+        if is_seoulskin:
+            review_language_instruction = """15 Customer Reviews - SEOULSKIN (PREMIUM ENGLISH FOCUS):
+               - MAJORITY (10-12 reviews) should be in premium English with sophisticated tone
+               - MINORITY (3-5 reviews) can include light Hinglish for authenticity
+               - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
+               - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+        else:
+            review_language_instruction = """15 Customer Reviews in HINGLISH format:
+               - Use natural Hinglish (Hindi-English mix) like: "bohot acha h", "mujhe pasand aaya", "ekdum fresh lagta h"
+               - First 2 reviews: Long story-style testimonials (premium English with Hindi words)
+               - Remaining 13 reviews: Short casual Hinglish reviews
+               - Mix casual Hinglish with some premium English reviews
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+        
+        if is_electronics:
+            # Electronics-specific full content with Box Includes and Warranty
+            full_web_prompt = f"""
             Generate the following website content in a structured format:
 
             1. 7 Bullet Points – focus on customer benefits, pain points, or product uniqueness.
-            2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words.
+            2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words. 
+               IMPORTANT: After the description, add "What's in the Box" section with items listed as bullet points (one per line with dash), 
+               followed by "Warranty Information" section.
             3. USP Points – concise value-driven phrases (2–4 words each).
             4. What do you get – brief explanation of what comes in the package.
             5. How to use – easy-to-follow, friendly, step-by-step instructions.
             6. 6 FAQs – with short, helpful answers.
-            7. 15 Customer Reviews – first 2 as story-style testimonials, remaining 13 as short user opinions.
+            7. {review_language_instruction}
+            8. Brand & Contact Information – Include brand ownership, country of origin, contact details.
+            
+            IMPORTANT: Provide ALL content in plain text format only. Do NOT use markdown formatting such as:
+            - No ** for bold text
+            - No ## for headings
+            - No *** or ___ for dividers
+            - No markdown bullet points with *
+            - Use simple text formatting only with clear section labels
 
             Product Name: {product_info.get('Product Name', 'N/A')}
             Brand: {product_info.get('Brand Name', 'N/A')}
@@ -348,7 +506,47 @@ if uploaded_file:
             Claims: {product_info.get('Claims', 'N/A')}
             How to Use: {product_info.get('How to use it?', 'N/A')}
             MRP: {product_info.get('MRP (Incl. of all taxes)', 'N/A')}
+            Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
+            Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
+            Email: {product_info.get('Email', 'N/A')}
+            Contact: {product_info.get('Contact Us', 'N/A')}
+            Box Includes: {product_info.get('Box Includes', 'N/A')}
+            Warranty: {product_info.get('Warranty', 'N/A')}
         """
+        else:
+            # Beauty products - original format without Box Includes and Warranty
+            full_web_prompt = f"""
+            Generate the following website content in a structured format:
+
+            1. 7 Bullet Points – focus on customer benefits, pain points, or product uniqueness.
+            2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words.
+            3. USP Points – concise value-driven phrases (2–4 words each).
+            4. What do you get – brief explanation of what comes in the package.
+            5. How to use – easy-to-follow, friendly, step-by-step instructions.
+            6. 6 FAQs – with short, helpful answers.
+            7. {review_language_instruction}
+            8. Brand & Contact Information – Include brand ownership, country of origin, contact details.
+            
+            IMPORTANT: Provide ALL content in plain text format only. Do NOT use markdown formatting such as:
+            - No ** for bold text
+            - No ## for headings
+            - No *** or ___ for dividers
+            - No markdown bullet points with *
+            - Use simple text formatting only with clear section labels
+
+            Product Name: {product_info.get('Product Name', 'N/A')}
+            Brand: {product_info.get('Brand Name', 'N/A')}
+            USPs / Features: {product_info.get('USPs Front', 'N/A')}
+            Ingredients: {product_info.get('Ingredients', 'N/A')}
+            Claims: {product_info.get('Claims', 'N/A')}
+            How to Use: {product_info.get('How to use it?', 'N/A')}
+            MRP: {product_info.get('MRP (Incl. of all taxes)', 'N/A')}
+            Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
+            Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
+            Email: {product_info.get('Email', 'N/A')}
+            Contact: {product_info.get('Contact Us', 'N/A')}
+        """
+        
         web_full = generate_section("Website Content", full_web_prompt)
         st.session_state['web_full'] = web_full
     text_box("Full Website Content", 'web_full', 500)
@@ -367,13 +565,45 @@ if uploaded_file:
 
     st.session_state.setdefault('web_description', '')
     if st.button("Generate Website Description"):
-        web_desc_prompt = f"""
+        # Use the selected category from the UI
+        category = product_info.get('Category', 'Beauty')
+        is_electronics = 'Electronics' in str(category)
+        
+        if is_electronics:
+            # Electronics-specific description with Box Includes and Warranty
+            web_desc_prompt = f"""
             Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with two paragraphs.
+            Include brand credibility information naturally in the content.
+            
+            After the main description, add two additional sections:
+            1. "What's in the Box" - List all items included as bullet points (one item per line with a dash)
+            2. "Warranty Information" - Include warranty details
+            
+            Format the box contents as simple bullet points (use - for each item, one per line).
 
             Product: {product_info.get('Product Name', 'N/A')}
+            Brand: {product_info.get('Brand Name', 'N/A')}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
+            Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
+            Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
+            Box Includes: {product_info.get('Box Includes', 'N/A')}
+            Warranty: {product_info.get('Warranty', 'N/A')}
+        """
+        else:
+            # Beauty products - original format
+            web_desc_prompt = f"""
+            Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with two paragraphs.
+            Include brand credibility information naturally in the content.
+
+            Product: {product_info.get('Product Name', 'N/A')}
+            Brand: {product_info.get('Brand Name', 'N/A')}
+            USPs: {product_info.get('USPs Front', 'N/A')}
+            Claims: {product_info.get('Claims', 'N/A')}
+            Ingredients: {product_info.get('Ingredients', 'N/A')}
+            Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
+            Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
         """
         st.session_state['web_description'] = generate_section("website description", web_desc_prompt)
     text_box("Website Description", 'web_description', 200)
@@ -443,16 +673,81 @@ if uploaded_file:
 
     st.session_state.setdefault('reviews', '')
     if st.button("Generate Reviews"):
+        # Check if brand is Seoulskin for language preference
+        brand_name = product_info.get('Brand Name', '').strip()
+        is_seoulskin = 'seoulskin' in brand_name.lower()
+        
+        if is_seoulskin:
+            language_instruction = """
+            LANGUAGE & STYLE REQUIREMENTS (SEOULSKIN - PREMIUM ENGLISH FOCUS):
+            - MAJORITY (10-12 reviews) should be in premium English with sophisticated tone
+            - MINORITY (3-5 reviews) can include light Hinglish for authenticity
+            - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
+            - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+            - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+            """
+        else:
+            language_instruction = """
+            LANGUAGE & STYLE REQUIREMENTS:
+            - Use natural Hinglish like real Indian customers speak (mix of Hindi and English words)
+            - Use casual, conversational tone with Hindi words like: bohot, acha, laga, pasand, mujhe, thoda, ekdum, zyada, etc.
+            - Hindi words should be written in Roman script (Hinglish)
+            - Mix both English and Hindi naturally in the same sentence
+            - Use common phrases like: "mujhe pasand aaya", "bohot acha h", "thoda zyada", "ekdum fresh"
+            """
+        
         review_prompt = f"""
             Write 15 customer reviews for this product.
-            - The first 2 should be long story-style testimonials.
-            - The remaining 13 should be short, specific, and highlight different use cases or outcomes.
-            - All reviewer names should sound authentic and be common Indian names.
+            
+            {language_instruction}
+            
+            REVIEW STRUCTURE:
+            - First 2 reviews: Long, story-style testimonials
+            - Remaining 13 reviews: Short reviews highlighting different aspects
+            - All reviewer names should be common Indian names (first name + last name)
+            
+            EXAMPLES OF HINGLISH STYLE TO FOLLOW:
+            - "Ye eye patches bohot ache hai, ekdum cooling effect deta h aur eyes fresh lagti h"
+            - "First time use kiya aur dark circles thode light lag rahe h, mujhe acha laga ye product"
+            - "Daily laptop pe kaam karne se meri eyes bohot tired lagti thi, ye laga ke thoda fresh feel hota h"
+            - "Feels like an expensive spa treatment! cooling, de-puffing, and brightening all in one."
+            - "The texture, the packaging, the results—everything about these eye patches screams luxury."
+            - "pehli baar try kiya aur accha laga, mujhe lagta h regular use se aur best result milega"
+            - "thanda thanda lagta h lagane ke baad, mujhe toh ye bohot pasand aaya"
+            
+            TONE VARIATIONS:
+            - Mix casual Hinglish reviews with some premium English reviews
+            - Some reviews should be very casual (more Hindi), some semi-formal (more English)
+            - Include both positive experiences and realistic observations (like "thoda patience chahiye result ke liye")
+            
+            IMPORTANT: Provide the output in plain text format only. Do NOT use markdown formatting like **, __, or ###. Just use simple text with reviewer name followed by their review separated by " – ".
 
             Product: {product_info.get('Product Name', 'N/A')}
         """
         st.session_state['reviews'] = generate_section("Reviews", review_prompt)
     text_box("Customer Reviews", 'reviews', 300)
+
+    st.session_state.setdefault('brand_info', '')
+    if st.button("Generate Brand & Contact Info"):
+        brand_info_prompt = f"""
+            Generate a professional brand and contact information section for the website footer. 
+            Format it in a clean, easy-to-read structure suitable for a website.
+            Include:
+            - Brand ownership and marketing information
+            - Country of origin
+            - Customer support contact details
+            - Email address
+            
+            Make it concise, professional, and customer-friendly.
+
+            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
+            Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
+            Email: {product_info.get('Email', 'N/A')}
+            Contact: {product_info.get('Contact Us', 'N/A')}
+        """
+        st.session_state['brand_info'] = generate_section("Brand & Contact Info", brand_info_prompt)
+    text_box("Brand & Contact Information", 'brand_info', 150)
 
     # Export or clear
     if st.button("📥 Download Output as Word"):
@@ -477,6 +772,7 @@ if uploaded_file:
                 ('How to Use', 'how_to_use'),
                 ('FAQs', 'faqs'),
                 ('Customer Reviews', 'reviews'),
+                ('Brand & Contact Information', 'brand_info'),
                 ('Full Website Content', 'web_full')
             ]
 
@@ -500,13 +796,13 @@ if uploaded_file:
         except Exception as e:
             st.error(f"❌ Error creating Word document: {str(e)}")
     if st.button("🧹 Clear All"):
-        for key in ['title', 'bullets', 'description', 'shopify', 'hero', 'a_plus', 'web_bullets', 'web_description', 'usp', 'what_you_get', 'how_to_use', 'faqs', 'reviews', 'web_full']:
+        for key in ['title', 'bullets', 'description', 'shopify', 'hero', 'a_plus', 'web_bullets', 'web_description', 'usp', 'what_you_get', 'how_to_use', 'faqs', 'reviews', 'brand_info', 'web_full']:
             st.session_state[key] = ''
         st.success("✅ All content cleared!")
         st.rerun()
 
     if st.button("📥 Download Output as JSON"):
-        output = {k: st.session_state.get(k, '') for k in ['title', 'bullets', 'description', 'shopify', 'hero', 'a_plus', 'web_bullets', 'web_description', 'usp', 'what_you_get', 'how_to_use', 'faqs', 'reviews', 'web_full']}
+        output = {k: st.session_state.get(k, '') for k in ['title', 'bullets', 'description', 'shopify', 'hero', 'a_plus', 'web_bullets', 'web_description', 'usp', 'what_you_get', 'how_to_use', 'faqs', 'reviews', 'brand_info', 'web_full']}
         json_str = json.dumps(output, indent=2)
         st.download_button("Download JSON", data=json_str, file_name="listing_content.json", mime="application/json")
 
