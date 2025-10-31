@@ -12,6 +12,67 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 st.set_page_config(page_title="Product Listing Automation", layout="wide")
 st.title("📦 Product Listing Automation Tool")
 
+# Function to generate SEO keywords automatically
+def generate_seo_keywords(product_name, key_benefits, description_summary, brand_tonality):
+    """
+    Calls the OpenAI API to generate a structured JSON array of SEO keywords.
+    """
+    if not openai.api_key:
+        st.error("❌ OpenAI API Key is not set.")
+        return []
+
+    # Define the System Instruction
+    system_instruction = (
+        "You are an expert SEO keyword researcher specializing in e-commerce (Amazon, Shopify, etc.). "
+        "Your sole task is to analyze the provided product name, key benefits, and description to "
+        "generate a list of 25 high-value, relevant SEO keywords. Keywords must be relevant to "
+        "purchase intent, long-tail, and address common customer search queries. "
+        "Output MUST be a single JSON object containing an array. "
+        "JSON Structure: {\"keywords\": [{\"keyword\": \"exact keyword phrase\", \"type\": \"Primary, Long-Tail, Competitor, or LSI\", \"search_intent\": \"Commercial, Transactional, or Informational\"}, ...]}"
+    )
+
+    # Define the User Prompt
+    user_prompt = f"""
+Generate the SEO keywords JSON for the following product:
+
+1. Product Name: {product_name}
+2. Core USPs/Key Benefits: {key_benefits}
+3. Product Description Summary: {description_summary}
+4. Brand Context (Tonality): {brand_tonality}
+"""
+    
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7
+        )
+        
+        json_output = response.choices[0].message.content
+        parsed_json = json.loads(json_output)
+        
+        # Extract the keywords list
+        if isinstance(parsed_json, list):
+            keywords_list = parsed_json
+        elif isinstance(parsed_json, dict):
+            keywords_list = parsed_json.get('keywords', []) or parsed_json.get('data', [])
+        else:
+            st.error("❌ Failed to parse structured JSON output from API.")
+            return []
+
+        return keywords_list
+
+    except json.JSONDecodeError:
+        st.error("❌ API returned invalid JSON. Please retry.")
+    except Exception as e:
+        st.error(f"❌ OpenAI API Error: {str(e)}")
+        
+    return []
+
 # Brand Tonality Dictionary - Embedded in code
 BRAND_TONALITIES = {
     "MakeMeeBold": """Confident, not cocky: Customers are sure about our products because they work, not because of overselling.
@@ -46,6 +107,47 @@ Authentic & credible: Rooted in the principles of Korean skincare, the brand com
 Sophisticated & understated: Elegant, refined, and approachable — appeals to consumers who value quality and efficacy over trends.
 Mindful & reassuring: Speaks to the desire for slow, consistent care — emphasizing trust, comfort, and skin confidence."""
 }
+
+# Helper function to normalize and match brand names
+def normalize_brand_name(brand_name):
+    """
+    Normalize brand name for case-insensitive and spacing-insensitive matching.
+    Returns the standardized brand name from BRAND_TONALITIES keys.
+    """
+    if not brand_name:
+        return None
+    
+    # Clean the input: strip, lowercase, remove extra spaces
+    cleaned = ' '.join(brand_name.strip().lower().split())
+    
+    # Create a mapping of normalized names to actual keys
+    brand_mapping = {
+        'makemeebold': 'MakeMeeBold',
+        'make mee bold': 'MakeMeeBold',
+        'urbanyog': 'Urban Yog',
+        'urban yog': 'Urban Yog',
+        'urbangabru': 'Urban Gabru',
+        'urban gabru': 'Urban Gabru',
+        'seoulskin': 'Seoulskin',
+        'seoul skin': 'Seoulskin'
+    }
+    
+    # Check direct mapping first
+    if cleaned in brand_mapping:
+        return brand_mapping[cleaned]
+    
+    # Try to match by removing all spaces
+    cleaned_no_space = cleaned.replace(' ', '')
+    for key, value in brand_mapping.items():
+        if cleaned_no_space == key.replace(' ', ''):
+            return value
+    
+    # Try partial matching with BRAND_TONALITIES keys
+    for brand_key in BRAND_TONALITIES.keys():
+        if cleaned == brand_key.lower() or cleaned.replace(' ', '') == brand_key.lower().replace(' ', ''):
+            return brand_key
+    
+    return None
 
 st.subheader("📥 Upload KLD Sheet")
 uploaded_file = st.file_uploader("Upload your KLD Excel file", type=["xlsx"])
@@ -104,8 +206,9 @@ if uploaded_file:
             'Claims': get_field('Claims'),
             'How to use it?': get_field('HOW TO USE IT?', 'HOW TO USE', 'How to use it?', 'How to use'),
             'MRP (Incl. of all taxes)': get_field('MRP (Incl. of all taxes)', 'MRP'),
-            'Category': get_field('Category', 'Product Type', 'Application Area', default='Beauty'),
+            'Category': get_field('Category', 'Product Type', 'Application Area', default=''),
             'Target Audience': get_field('Target Audience', 'Ideal For', default=''),
+            'Ideal For (Gender)': get_field('Ideal For (Gender)', 'Ideal for (Gender)', 'Ideal For', 'Gender', default=''),
             'KNOW YOUR PRODUCT': get_field('KNOW YOUR PRODUCT', 'Know Your Product', default=''),
             'Net Qty.': get_field('Net Qty.', 'Net Qty', default=''),
             'Country Of Origin': get_field('Country Of Origin', 'Country of Origin', default=''),
@@ -129,22 +232,44 @@ if uploaded_file:
     # Try to get category from the file first
     detected_category = product_info.get('Category', '')
     
-    # Category selection with radio buttons
-    selected_category = st.radio(
-        "Choose the product category (Required):",
-        options=["Beauty", "Electronics"],
-        index=0 if not detected_category or 'Beauty' in str(detected_category) else 1,
-        horizontal=True,
-        help="This determines which content templates and fields to use"
-    )
+    # Determine if category was actually detected from sheet (not just the default 'Beauty')
+    # Check if it's a meaningful detection by looking at the original field
+    category_detected = detected_category and detected_category != 'Beauty'
     
-    # Update the product_info with selected category
-    product_info['Category'] = selected_category
+    # Category selection with radio buttons
+    if category_detected:
+        # If category detected from sheet, auto-select it
+        if 'Electronics' in str(detected_category):
+            default_index = 1
+        elif 'Beauty' in str(detected_category):
+            default_index = 0
+        else:
+            default_index = None
+        
+        selected_category = st.radio(
+            "Choose the product category (Required):",
+            options=["Beauty", "Electronics"],
+            index=default_index,
+            horizontal=True,
+            help="Category detected from sheet. You can change if needed."
+        )
+    else:
+        # If no category detected, don't pre-select anything - let user choose
+        selected_category = st.radio(
+            "Choose the product category (Required):",
+            options=["Beauty", "Electronics"],
+            index=None,
+            horizontal=True,
+            help="Please select the product category to continue"
+        )
     
     # Show warning if no category is selected
     if not selected_category:
         st.warning("⚠️ Please select a product category to continue")
         st.stop()
+    
+    # Update the product_info with selected category
+    product_info['Category'] = selected_category
     
     st.success(f"✅ Category set to: **{selected_category}**")
     
@@ -152,18 +277,17 @@ if uploaded_file:
     st.subheader("🏷️ Select Brand")
     
     # Try to detect brand from the file
-    detected_brand = product_info.get('Brand Name', '')
+    detected_brand_raw = product_info.get('Brand Name', '')
+    detected_brand = normalize_brand_name(detected_brand_raw)
     
     # Get available brands from tonality file
     available_brands = list(BRAND_TONALITIES.keys()) if BRAND_TONALITIES else []
     
     if available_brands:
-        # Try to match detected brand with available brands
+        # Set default index based on normalized brand detection
         default_index = 0
-        for idx, brand in enumerate(available_brands):
-            if detected_brand and brand.lower() in detected_brand.lower():
-                default_index = idx
-                break
+        if detected_brand and detected_brand in available_brands:
+            default_index = available_brands.index(detected_brand)
         
         selected_brand = st.selectbox(
             "Choose the brand (Required):",
@@ -197,6 +321,56 @@ if uploaded_file:
     display_df = display_df[display_df['Value'] != 'Not specified']
     
     st.table(display_df)
+    
+    st.markdown("---")
+    
+    # SEO Keywords Auto-Generation Section
+    st.subheader("🔍 SEO Keywords for Amazon Content")
+    
+    # Initialize session state for SEO keywords
+    if 'seo_keywords_data' not in st.session_state:
+        st.session_state['seo_keywords_data'] = []
+    if 'seo_keywords_text' not in st.session_state:
+        st.session_state['seo_keywords_text'] = ""
+    
+    # Auto-generate button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("✨ Auto-Generate Keywords"):
+            with st.spinner("🤖 Generating SEO Keywords..."):
+                product_name = product_info.get('Product Name', 'N/A')
+                key_benefits = product_info.get('USPs Front', 'N/A')
+                description_summary = product_info.get('Claims', 'N/A')
+                brand_tonality = BRAND_TONALITIES.get(selected_brand, '')
+                
+                keywords_data = generate_seo_keywords(product_name, key_benefits, description_summary, brand_tonality)
+                st.session_state['seo_keywords_data'] = keywords_data
+                
+                # Convert to comma-separated text for easy editing
+                if keywords_data:
+                    keyword_list = [item.get('keyword', '') for item in keywords_data if item.get('keyword')]
+                    st.session_state['seo_keywords_text'] = ", ".join(keyword_list)
+                    st.success(f"✅ Generated {len(keywords_data)} SEO Keywords!")
+    
+    # Editable text area for keywords
+    st.session_state['seo_keywords_text'] = st.text_area(
+        "Edit SEO Keywords (comma-separated)",
+        value=st.session_state['seo_keywords_text'],
+        placeholder="e.g., anti-aging serum, wrinkle reducer, vitamin C, face serum for women",
+        height=100,
+        help="These keywords will be used in Amazon Title, Bullets, and Description. You can edit them before generating content."
+    )
+    
+    # Clean and format keywords
+    formatted_keywords = st.session_state['seo_keywords_text'].strip() if st.session_state['seo_keywords_text'] else ""
+    
+    if formatted_keywords:
+        keyword_count = len([k.strip() for k in formatted_keywords.split(',') if k.strip()])
+        st.info(f"📌 Using {keyword_count} keywords for Amazon content generation")
+    else:
+        st.warning("⚠️ Please generate or add SEO keywords before creating Amazon content")
+    
+    st.markdown("---")
 
     def generate_section(section_name, instruction):
         try:
@@ -225,32 +399,99 @@ if uploaded_file:
             st.text_area(label, st.session_state[key], height=height)
 
     # Amazon Content Generation
+    st.subheader("🛒 Amazon Content")
+    
+    # Check if SEO keywords are present before allowing Amazon content generation
+    amazon_disabled = not formatted_keywords
+    
+    if amazon_disabled:
+        st.error("❌ SEO Keywords are required for Amazon content generation!")
+        st.info("👆 Please generate or add SEO keywords in the section above before proceeding.")
+    
+    # Normalize brand name once for all Amazon content sections
+    brand_name_raw = product_info.get('Brand Name', '').strip()
+    normalized_brand = normalize_brand_name(brand_name_raw) or selected_brand or product_info.get('Brand Name', 'N/A')
+    
     st.session_state.setdefault('title', '')
-    if st.button("Generate Product Title"):
+    if st.button("Generate Product Title", disabled=amazon_disabled):
+        # Build SEO keywords instruction based on user input
+        seo_instruction = ""
+        if formatted_keywords:
+            seo_instruction = f"\n- MUST include these SEO keywords naturally: {formatted_keywords}"
+        else:
+            seo_instruction = "\n- Add SEO keywords with high search volume & relevant keywords"
+        
+        # Check product category for category-specific title requirements
+        category = product_info.get('Category', 'Beauty')
+        is_electronics = 'Electronics' in str(category)
+        
+        if is_electronics:
+            # Electronics-specific title requirements
+            category_instruction = f"""
+            
+            ELECTRONICS CATEGORY - MUST INCLUDE IN TITLE:
+            - Charging cable type (e.g., USB-C, Magnetic, Type-C)
+            - Battery information (e.g., battery capacity, runtime, rechargeable)
+            - Technology used (e.g., IPX7 waterproof, 5-speed motor, sonic technology)
+            - These technical specifications are CRITICAL for electronics products
+            """
+        else:
+            # Beauty category - net quantity requirement
+            category_instruction = f"""
+            
+            BEAUTY CATEGORY - MUST INCLUDE IN TITLE:
+            - Net Qty. in title with proper units (ml or g or units)
+            - Example: "50ml", "30g", "60 Patches"
+            - Net Quantity: {product_info.get('Net Qty.', 'N/A')}
+            """
+        
         title_prompt = f"""
-            Write an Amazon product title (max 200 characters) for a high-converting listing.
+            Write an Amazon product title (min 230 characters) for a high-converting listing.
             Use this format: Brand + Product Type + Keywords + Claims.
-            Do not include size, weight, or volume in the title.
+            Do not include size, weight, or volume dimensions in the title.
+            
+            IMPORTANT GUIDELINES:
+            - Title character limit: 230-240 characters minimum
+            - Do NOT use words like "bestselling" in the title
+            - Do NOT use claims such as "whitening/brightening/fair" in the title
+            - Instead, use words/phrases such as "reduces/promotes/helps in reducing"{category_instruction}{seo_instruction}
+            - Ensure proper spelling and grammar
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand}
+            Category: {category}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
+            Net Qty: {product_info.get('Net Qty.', 'N/A')}
+            Know Your Product: {product_info.get('KNOW YOUR PRODUCT', '')}
         """
         st.session_state['title'] = generate_section("title", title_prompt)
     text_box("Amazon Product Title", 'title', 100)
-    st.subheader("🛒 Amazon Content")
+    
     st.session_state.setdefault('bullets', '')
-    if st.button("Generate Bullet Points"):
+    if st.button("Generate Bullet Points", disabled=amazon_disabled):
+        # Build SEO keywords instruction based on user input
+        seo_instruction = ""
+        if formatted_keywords:
+            seo_instruction = f"\n- MUST include these SEO keywords naturally across the bullets: {formatted_keywords}"
+        else:
+            seo_instruction = "\n- Add SEO keywords with high search volume & relevant keywords"
+        
         bullet_prompt = f"""
             Write 7 optimized Amazon bullet points. Each bullet should follow this format:
             BENEFIT IN CAPS: Followed by a clear, compelling benefit (250–300 characters).
 
             Avoid mentioning price, value for money, discounts, or any numerical cost-related details. Focus only on features, results, usage, or ingredient benefits.
+            
+            IMPORTANT GUIDELINES:
+            - Do NOT use words like "bestselling"
+            - Do NOT use claims such as "whitening/brightening/fair"
+            - Instead, use words/phrases such as "reduces/promotes/helps in reducing"{seo_instruction}
+            - Ensure proper spelling and grammar
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand}
             USPs: {product_info.get('USPs Front', 'N/A')}, {product_info.get('USP Back', 'N/A')}, {product_info.get('USP Side', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
@@ -260,13 +501,27 @@ if uploaded_file:
     text_box("Generated Bullet Points", 'bullets', 200)
 
     st.session_state.setdefault('description', '')
-    if st.button("Generate Description"):
+    if st.button("Generate Description", disabled=amazon_disabled):
+        # Build SEO keywords instruction based on user input
+        seo_instruction = ""
+        if formatted_keywords:
+            seo_instruction = f"\n- MUST include these SEO keywords naturally in the description: {formatted_keywords}"
+        else:
+            seo_instruction = "\n- Add SEO keywords with high search volume & relevant keywords"
+        
         desc_prompt = f"""
             Write an Amazon HTML product description (max 400 words).
             Use 2 paragraphs, <p> and <br> tags for light formatting.
+            
+            IMPORTANT GUIDELINES:
+            - Do NOT use words like "bestselling"
+            - Do NOT use claims such as "whitening/brightening/fair"
+            - Instead, use words/phrases such as "reduces/promotes/helps in reducing"{seo_instruction}
+            - Ensure proper spelling and grammar
+            - Strictly avoid exaggerated exclamations/expressions in the description
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
@@ -286,9 +541,11 @@ if uploaded_file:
             - Do not use # for headings
             - Do not use markdown syntax
             - Use simple text formatting only
+            
+            IMPORTANT: Strictly avoid exaggerated exclamations/expressions in the description.
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
@@ -302,128 +559,136 @@ if uploaded_file:
     if st.button("Generate Hero Prompts"):
         # Use the selected category from the UI
         category = product_info.get('Category', 'Beauty')
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        brand_name = normalize_brand_name(brand_name_raw) or selected_brand
+        
+        # Brand-specific tone instruction
+        brand_tone = ""
+        if brand_name and brand_name in BRAND_TONALITIES:
+            brand_tone = f"\n\nBRAND TONE: {brand_name}\n{BRAND_TONALITIES[brand_name]}\nEnsure all headlines and text overlays reflect this brand's voice and personality."
         
         if 'Beauty' in str(category):
             hero_prompt = f"""
-                Generate a series of 7 hero image prompts for a beauty product, each designed to be a standalone visual in the following sequence.  
-                Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
-                
-                IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
+Generate 8 hero image prompts for a beauty product listing (1500 x 1500 pixels each).
+IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
 
-                1. Hero Image: What does it do / Differentiation / Before-After  
-                - Show the product with a clear before-and-after comparison, highlighting the main benefit or transformation.  
-                - Use high-resolution, professional imagery with a clean, softly colored, on-brand background.  
-                - Overlay concise benefit-driven text or icons.  
-                - Ensure the product is the main focal point.
+CRITICAL NOTE: Hero and A+ images should NOT repeat the same content or visuals. Even if the core message aligns, it must be expressed differently through distinct headlines, layouts, and imagery.{brand_tone}
 
-                2. USP  
-                - Focus on the unique selling proposition that sets this product apart.  
-                - Use bold text or a badge to highlight the USP.  
-                - Incorporate lifestyle or in-use imagery for emotional connection.
+Hero Image 1: Product Highlight
+Content Focus: Always provide these 3 variations
+Hero Image 1.a_Product Image (clean product shot on neutral background)
+Hero Image 1.b_Product + Box (product with packaging)
+Hero Image 1.c_Product + Model (product with model showcasing usage or application)
 
-                3. Ingredients & Their Use  
-                - Visually showcase key ingredients with small icons or illustrations.  
-                - Briefly mention each ingredient's benefit.  
-                - Use a soft, inviting color palette.
+Hero Image 2: Core Value Proposition
+Content Focus: Show what the product does best and the main problem it solves.
+Examples: "Hydration that Lasts 72 Hours", "Brightens, Firms, and Smoothens", "Glass Skin Made Simple"
+Goal: Hook emotionally + highlight the transformation
+Visual Direction: Model or texture-based visual (glowing skin close-up, droplets). Use warm lighting and a big, bold headline with minimal supporting text.
 
-                4. Science Behind USP  
-                - Include science-related visuals (molecules, lab glassware, dermatologist icons) to reinforce efficacy.  
-                - Overlay a short, clear explanation of the science behind the USP.
+Hero Image 3: Benefits Snapshot
+Content Focus: List 3-5 clear user-facing benefits based on USPs and ingredients
+Examples: Deep Hydration, Reduces Dullness, Refines Pores, Enhances Glow, Lightweight Formula
+Goal: Educate quickly about visible results customers can expect
+Visual Direction: Icon grid or short text blocks next to corresponding visuals (skin texture, serum drop, flower ingredient, glow effect). Use clean brand colors and symmetrical spacing.
 
-                5. Comparison / Do's and Don'ts  
-                - Create a side-by-side comparison with alternatives or a clear Do's and Don'ts visual.  
-                - Use simple icons and minimal text for clarity.
+Hero Image 4: Ingredient Power / Science Behind
+Content Focus: Highlight key actives or formulation technology
+Examples: "Powered by 5% Niacinamide + Hyaluronic Acid", "Infused with Rosehip & Avocado Oils", "K-Beauty Formula for Glass-Like Skin"
+Goal: Show authenticity and formulation strength
+Visual Direction: Macro ingredient visuals (bubbles, botanicals, lab glass textures). Combine text overlays and ingredient icons. Use light backgrounds to emphasize purity.
 
-                6. How to Use  
-                - Present step-by-step usage instructions in 3–4 crisp, numbered icons or steps.  
-                - Keep instructions short, clear, and visually engaging.
+Hero Image 5: Comparison Table / Why It's Better
+Content Focus: Show how your product outperforms typical alternatives (creams, masks, etc.)
+Goal: Build trust and show superiority
+Visual Direction: Clean two-column table with brand-color highlights. Add product image near your column.
 
-                7. Safe for All Hair/Skin Types  
-                - Use icons or imagery showing diversity in models (different skin/hair types).  
-                - Add a clear statement or badge indicating suitability for all.
+Hero Image 6: How to Use / Routine Step
+Content Focus: Simple, 3-4 step usage guide
+Example: 1. Cleanse your skin, 2. Apply a thin layer evenly, 3. Leave overnight or rinse as directed, 4. Wake up to soft, radiant skin
+Goal: Simplify usage and make it look effortless
+Visual Direction: Step-by-step icons or close-up lifestyle visuals of hand applying product. Use numbered circles and pastel backgrounds.
 
-                General Visual/Creative Directions for All Images:  
-                - Each image must be exactly 1500 x 1500 pixels.  
-                - Use high-resolution, professional images.  
-                - Clean, uncluttered, on-brand backgrounds.  
-                - Overlay concise, benefit-driven text or icons.  
-                - Maintain a consistent style, color palette, and font across all images.  
-                - Optimize for both desktop and mobile screens.  
-                - Avoid clutter; keep visuals focused and easy to scan.  
-                - Do not include any call-to-action (CTA) buttons.  
-                - Include relevant props that complement the product and provide context, without distracting from the main subject.  
-                - Feature models where appropriate, ensuring diversity in skin and hair types to show inclusivity and real-world results.  
-                - Use professional lighting setups (such as three-point lighting, softboxes, umbrellas, or ring lights) for soft, even illumination and to minimize harsh shadows.  
-                - Capture the product from optimal angles, including close-ups for detail and lifestyle shots for context.  
-                - Ensure the product is always the main focal point, with props and models used to enhance the story.
+Hero Image 7: Key Differentiator / Main USP
+Content Focus: Highlight one powerful claim or innovation from USPs and Ingredient list
+Examples: "50,000 PPM Niacinamide - The Glass Skin Secret", "Clinically Proven to Hydrate Overnight", "Formulated by Korean Skin Experts"
+Goal: Create a memorable "hero claim"
+Visual Direction: Close-up of texture or ingredient with overlay text. Add scientific/clean design cues (beaker glow, droplet macro).
 
-                Product details:  
-                Product: {product_info.get('Product Name', 'N/A')}  
-                USP: {product_info.get('USPs Front', 'N/A')}  
-                Ingredients: {product_info.get('Ingredients', 'N/A')}  
-                How to use: {product_info.get('How to use it?', 'N/A')}  
-                Target: {product_info.get('Target Audience', '')}  
-                Other details: {product_info.get('KNOW YOUR PRODUCT', '')}
-                """
+Hero Image 8: Before and After using the Product
+Content Focus: Visually showcase the transformation - smoother, clearer, or more radiant skin
+Goal: Build trust by showing tangible, visible improvements
+Visual Direction: Side-by-side layout ("Before" left, "After" right). Use consistent lighting and angles. Add soft labels and minimal caption like "Brighter. Smoother. More Hydrated." Include product image subtly near "After" side. Clean, bright, natural background.
+
+Product details:
+Product: {product_info.get('Product Name', 'N/A')}
+USPs: {product_info.get('USPs Front', 'N/A')}
+Ingredients: {product_info.get('Ingredients', 'N/A')}
+Claims: {product_info.get('Claims', 'N/A')}
+How to use: {product_info.get('How to use it?', 'N/A')}
+Target: {product_info.get('Target Audience', '')}
+"""
         elif 'Electronics' in str(category):
             hero_prompt = f"""
-            Generate a series of 7 hero image prompts for an electronics product, each designed to be a standalone visual in the following sequence.  
-            Each image must be exactly 1500 x 1500 pixels. For each image, include specific visual/creative directions as outlined.
-            
-            IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
+Generate 8 hero image prompts for an electronics product listing (1500 x 1500 pixels each).
+IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
 
-            1. Hero Image: What does it do / Differentiation / Before-After  
-            - Show the product in action or with a before-and-after or comparison visual.  
-            - Use high-resolution, professional imagery with a clean, on-brand background.  
-            - Overlay concise benefit-driven text or icons.
+CRITICAL NOTE: Hero and A+ images should NOT repeat the same content or visuals. Even if the core message aligns, it must be expressed differently through distinct headlines, layouts, and imagery.{brand_tone}
 
-            2. Main USP  
-            - Highlight the primary unique selling point with bold text or a badge.  
-            - Use dynamic angles and close-ups to draw attention.
+Hero Image 1: Product Highlight
+Content Focus: Always provide these 3 variations
+Hero Image 1.a_Product Image (clean product shot on neutral background)
+Hero Image 1.b_Product + Box (product with packaging)
+Hero Image 1.c_Product + Model (product being used by a model)
 
-            3. Other USPs  
-            - Present additional USPs or features with icons or short text.  
-            - Arrange features for easy scanning.
+Hero Image 2: Core Value Proposition
+Content Focus: Address what the product does, key pain points or highlight main benefit
+Examples: "Save thousands on Salon Bills", "Edge Shave - Zero Cuts. Chiseled Jaw Line", "Meet Rizzler- the beard boss"
+Goal: Hook users emotionally or practically within 3 seconds
+Visual Direction: Product-in-use shot showing a real person. Use short, bold headline + smaller subtext below. Include supporting visual cue (glowing motor light, water resistance, before-after contrast).
 
-            4. Comparison  
-            - Create a side-by-side comparison with other products or brands.  
-            - Use simple graphics and minimal text.
+Hero Image 3: Key Areas of Use / Versatility
+Content Focus: Show how and where the product can be used
+Examples: "Face • Body • Underarms • Bikini" for trimmers, "Blow • Curl • Straighten" for hair tools
+Goal: Demonstrate multi-use versatility
+Visual Direction: Use product with labeled zones or side-by-side images. Add small icons or silhouettes for clarity. Keep layout clean and symmetrical.
 
-            5. How to Use  
-            - Show 2–4 easy-to-follow steps or icons for product usage.  
-            - Keep instructions short and visually engaging.
+Hero Image 4: Feature Highlights / Performance Benefits
+Content Focus: Show top 4-6 standout features in short, clear bullets
+Examples: 3 Interchangeable Heads, Dual-Speed Motor, IPX6 Waterproof, Type-C Charging, 100 Mins Runtime, Skin-Safe Blades
+Goal: Summarize core specs + key benefits in one glance
+Visual Direction: Split layout with product in center, feature callouts surrounding it. Use iconography or minimal graphic arrows to highlight components.
 
-            6. All Hair Type (if relevant)  
-            - Use a badge or icon to indicate compatibility with all hair types (for grooming devices).  
-            - Show diverse models if applicable.
+Hero Image 5: Comparison Table
+Content Focus: Show why your product is better than others - without naming competitors. Include 5-6 comparison points in tabular format
+Goal: Prove technical and functional superiority
+Visual Direction: Clean, minimal table design with brand-color highlights. Keep text large and legible; use product image or icon beside your column.
 
-            7. What's in the Box / Customer Care  
-            - Display all included accessories in a neat flat-lay or organized arrangement.  
-            - Add customer care contact or warranty info in a clear, non-intrusive way.
+Hero Image 6: What's in the Box
+Content Focus: Show exactly what the customer receives. Only list all components (main device, attachments, charger, brush, manual, etc.)
+Goal: Set clear buyer expectations and highlight value
+Visual Direction: Flat lay or 3D arrangement on neutral background. Use labels or numbering for each item. Ensure lighting consistency and neat spacing.
 
-            General Visual/Creative Directions for All Images:  
-            - Each image must be exactly 1500 x 1500 pixels.  
-            - Use high-resolution, professional images.  
-            - Clean, uncluttered, on-brand backgrounds.  
-            - Overlay concise, benefit-driven text or icons.  
-            - Consistent style, color palette, and font across all images.  
-            - Optimize for both desktop and mobile screens.  
-            - Avoid clutter; keep visuals focused and easy to scan.  
-            - Do not include any call-to-action (CTA) buttons.  
-            - Include relevant props that complement the product and provide context, without distracting from the main subject.  
-            - Feature models where appropriate (e.g., for scale or lifestyle context).  
-            - Use professional lighting setups (such as three-point lighting, softboxes, umbrellas, or ring lights) for soft, even illumination and to minimize harsh shadows.  
-            - Capture the product from optimal angles, including close-ups for detail and lifestyle shots for context.  
-            - Ensure the product is always the main focal point, with props and models used to enhance the story.
+Hero Image 7: Key Differentiator / Main USP
+Content Focus: Highlight one standout USP or technology that defines your product
+Examples: "Five heads and where they can be used", "Ceramic Blades for Safe Precision", "Dual-Speed Motor - Power Meets Control"
+Goal: Make the customer remember the key innovation or value
+Visual Direction: Close-up macro shot or bold visual metaphor (charging cable glowing, airflow effect, blade detail). Big product name overlay with short USP line underneath.
 
-            Product details:  
-            Product: {product_info.get('Product Name', 'N/A')}  
-            Main USP: {product_info.get('USPs Front', 'N/A')}  
-            Other USPs: {product_info.get('USP Back', '')}  
-            How to use: {product_info.get('How to use it?', 'N/A')}   
-            Customer care: {product_info.get('Customer Care', '')}  
-            Other details: {product_info.get('KNOW YOUR PRODUCT', '')}
-            """
+Hero Image 8: Lifestyle / Versatility Slide
+Content Focus: Show different looks or outcomes achievable with one tool
+Examples: "One Tool. Different Looks", "From Office to Party - Styled in Minutes", "Your Everyday Styling Partner"
+Goal: Highlight creative versatility and emotional payoff
+Visual Direction: Collage or side-by-side layout showing multiple styles or use-cases (beard shapes, hair looks). Keep tone aspirational and modern.
+
+Product details:
+Product: {product_info.get('Product Name', 'N/A')}
+Main USP: {product_info.get('USPs Front', 'N/A')}
+Other USPs: {product_info.get('USP Back', '')}
+Box Includes: {product_info.get('Box Includes', 'N/A')}
+How to use: {product_info.get('How to use it?', 'N/A')}
+Other details: {product_info.get('KNOW YOUR PRODUCT', '')}
+"""
         else:
             hero_prompt = "Category not supported. Please specify 'Beauty' or 'Electronics' in the Category field."
 
@@ -432,20 +697,121 @@ if uploaded_file:
 
     st.session_state.setdefault('a_plus', '')
     if st.button("Generate A+ Prompts"):
-        a_plus_prompt = f"""
-            Generate 7 Amazon A+ content image prompts in this format:
+        # Get category and brand
+        category = product_info.get('Category', 'Beauty')
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        brand_name = normalize_brand_name(brand_name_raw) or selected_brand
+        
+        # Brand-specific tone instruction
+        brand_tone = ""
+        if brand_name and brand_name in BRAND_TONALITIES:
+            brand_tone = f"\n\nBRAND TONE: {brand_name}\n{BRAND_TONALITIES[brand_name]}\nEnsure all headlines and text overlays reflect this brand's voice and personality."
+        
+        if 'Beauty' in str(category):
+            a_plus_prompt = f"""
+Generate 6 Amazon A+ content image prompts for a beauty product.
+IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
 
-            Image 1:
-            • Visual: 1464x600 (desktop) / 600x450 (mobile). Clean layout, brand, benefits.
-            • Text: Marketing headline
-            • Supporting Text: Short supporting copy
+CRITICAL NOTE: A+ images should expand the story by covering features, benefits, or brand details that are NOT highlighted in the hero images. Do not repeat hero image content.{brand_tone}
 
-            Product: {product_info.get('Product Name', 'N/A')}
-            USPs: {product_info.get('USPs Front', 'N/A')}
-            How to Use: {product_info.get('How to use it?', 'N/A')}
-            Claims: {product_info.get('Claims', 'N/A')}
-            Ingredients: {product_info.get('Ingredients', 'N/A')}
-        """
+A+ Image 1: Hero Banner + Core Promise
+Content Focus: Introduce the product and its biggest selling point in one frame
+- Short headline (6-8 words) that captures what the product does best
+- One-line subtext describing the benefit or problem it solves
+Example: Headline "Trim Smart. Style Effortlessly." | Subtext "Advanced precision grooming with zero nicks or cuts."
+Goal: Instantly communicate product purpose + emotional appeal (confidence, convenience, comfort)
+Visual Direction: Big, clean hero shot with product angled toward camera, soft gradient or lifestyle background (bathroom/vanity setup), short text overlay. Use a person in frame for relatability.
+
+A+ Image 2: Key Benefits & Features Overview
+Content Focus: Summarize top 4-6 performance benefits. Each point short, clear, action-oriented
+Goal: Show at a glance what makes the product technically strong and convenient
+Visual Direction: Grid layout or circular icons with micro close-ups of each feature. Clean background with product in center.
+
+A+ Image 3: Ingredients & Science
+Content Focus: Show hero ingredients and their benefits
+Examples: Niacinamide - Brightens and evens tone, Hyaluronic Acid - Deep hydration, Rosehip Oil - Restores softness
+Goal: Build trust and education
+Visual Direction: Macro ingredient visuals (drops, botanicals, molecular patterns), short text blocks, clean pastel background.
+
+A+ Image 4: How to Use (Pre & Post Steps)
+Content Focus: Show complete skincare ritual - Before Use (clean, dry skin), During Use (apply evenly with upward strokes), After Use (let absorb or rinse), Post Care (follow with moisturizer/sunscreen)
+Goal: Make application steps easy to follow while positioning as self-care ritual
+Visual Direction: Soft, minimal design with numbered steps. Calm pastel tones, water or glow textures, close-up visuals of model or hand applying product.
+
+A+ Image 5: Other Products from the Same Brand
+Content Focus: Showcase full skincare routine from same brand to encourage brand loyalty and cross-selling
+Example caption: "Complete Your Glow Routine with {brand_name}"
+Goal: Build brand ecosystem and communicate that products work better together
+Visual Direction: Flat lay or lineup of all products on marble or pastel background.
+
+A+ Image 6: Customer Reviews & FAQs
+Content Focus: Highlight authentic customer feedback that subtly answers common skincare doubts
+Sample Reviews with star ratings addressing: texture & results, safety for sensitive skin, frequency & visible benefits, absorption & effect
+Goal: Build social proof and credibility while resolving common queries
+Visual Direction: Soft review cards with real-sounding Indian names and 5-star icons.
+
+Product details:
+Product: {product_info.get('Product Name', 'N/A')}
+USPs: {product_info.get('USPs Front', 'N/A')}
+Ingredients: {product_info.get('Ingredients', 'N/A')}
+Claims: {product_info.get('Claims', 'N/A')}
+How to Use: {product_info.get('How to use it?', 'N/A')}
+"""
+        elif 'Electronics' in str(category):
+            a_plus_prompt = f"""
+Generate 6 Amazon A+ content image prompts for an electronics product.
+IMPORTANT: Provide the output in plain text format only. Do NOT use markdown syntax like **, ##, or bullet points with *. Use simple numbered lists and plain text.
+
+CRITICAL NOTE: A+ images should expand the story by covering features, benefits, or brand details that are NOT highlighted in the hero images. Do not repeat hero image content.{brand_tone}
+
+A+ Image 1: Hero Banner + Core Promise
+Content Focus: Introduce the product and its biggest selling point in one frame
+- Short headline (6-8 words) that captures what the product does best
+- One-line subtext describing the benefit or problem it solves
+Example: Headline "Trim Smart. Style Effortlessly." | Subtext "Advanced precision grooming with zero nicks or cuts."
+Goal: Instantly communicate product purpose + emotional appeal (confidence, convenience, comfort)
+Visual Direction: Big, clean hero shot with product angled toward camera, soft gradient or lifestyle background (bathroom/vanity setup), short text overlay. Use a person in frame for relatability.
+
+A+ Image 2: Key Benefits & Features Overview
+Content Focus: Summarize top 4-6 performance benefits. Each point short, clear, action-oriented
+Examples: Dual-Speed Motor for Precision, Type-C Fast Charging, IPX6 Waterproof, 100 Mins Runtime, Skin-Safe Ceramic Blades, Low-Noise Operation
+Goal: Show at a glance what makes the product technically strong and convenient
+Visual Direction: Grid layout or circular icons with micro close-ups of each feature (motor, blades, water resistance, battery). Clean background with product in center.
+
+A+ Image 3: How to Use - Step-by-Step
+Content Focus: Simplify the process visually with 3-4 short steps: Attach the right head/setting, Power on and glide gently, Clean and rinse after use, Store safely for next use
+Goal: Make it look effortless and beginner-friendly
+Visual Direction: Show real hands using the product. Use numbered steps with minimal text and small arrows/icons for direction. Keep color palette light, text clean and readable.
+
+A+ Image 4: Technology & Safety
+Content Focus: Highlight tech that ensures performance and user safety
+Example points: Smart Motor Control, Overheat Protection/Auto Shut-off, Ergonomic grip, Hypoallergenic material or skin-safe design
+Goal: Build trust in quality, durability, and innovation
+Visual Direction: Split image layout - left side showing macro or exploded view of product components (motor, battery, heating system), right side showing clean bullet list or icon-based text.
+
+A+ Image 5: Easy Charging & Travel-Friendly
+Content Focus: Highlight portability and convenience
+Include: Type-C Universal Charging (charge via laptop, adapter, power bank), Long-lasting Battery (runtime on one charge), Compact & Lightweight (fits in travel pouch)
+Goal: Reinforce "carry it anywhere, use it anywhere" confidence
+Visual Direction: Product next to laptop, power bank, or travel pouch. Include icons/graphics showing charging cable connection. Soft gradient or lifestyle setup (dresser, hotel counter).
+
+A+ Image 6: Promoting different products of the same brand
+Content Focus: Promote other products from same brand to encourage cross-selling. Include 3-4 product visuals from related categories
+Example: "Try our Fan-Favorites" or "Choose from the range of other products"
+Goal: Build brand recall and drive multi-product purchase
+Visual Direction: Clean product grid or carousel layout with uniform lighting.
+
+Product details:
+Product: {product_info.get('Product Name', 'N/A')}
+Main USP: {product_info.get('USPs Front', 'N/A')}
+Other USPs: {product_info.get('USP Back', '')}
+Box Includes: {product_info.get('Box Includes', 'N/A')}
+How to use: {product_info.get('How to use it?', 'N/A')}
+Battery/Charging: {product_info.get('Battery', 'N/A')}
+"""
+        else:
+            a_plus_prompt = "Category not supported. Please specify 'Beauty' or 'Electronics' in the Category field."
+        
         st.session_state['a_plus'] = generate_section("A+ image prompts", a_plus_prompt)
     text_box("A+ Image Prompts", 'a_plus', 180)
 
@@ -455,16 +821,96 @@ if uploaded_file:
         category = product_info.get('Category', 'Beauty')
         is_electronics = 'Electronics' in str(category)
         
-        # Check if brand is Seoulskin for language preference
-        brand_name = product_info.get('Brand Name', '').strip()
-        is_seoulskin = 'seoulskin' in brand_name.lower()
+        # Normalize brand name for consistent detection
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        brand_name = normalize_brand_name(brand_name_raw) or selected_brand
         
+        # Check brand using normalized name
+        is_seoulskin = brand_name == 'Seoulskin'
+        is_urban_gabru = brand_name == 'Urban Gabru'
+        is_urban_yog = brand_name == 'Urban Yog'
+        is_makemeebold = brand_name == 'MakeMeeBold'
+        
+        # Check if product is unisex from 'Ideal For (Gender)' field
+        gender_field = product_info.get('Ideal For (Gender)', '').lower()
+        is_unisex = 'unisex' in gender_field or ('men' in gender_field and 'women' in gender_field) or ('male' in gender_field and 'female' in gender_field)
+        
+        # Determine language distribution based on brand
         if is_seoulskin:
-            review_language_instruction = """15 Customer Reviews - SEOULSKIN (PREMIUM ENGLISH FOCUS):
+            if is_unisex:
+                review_language_instruction = """15 Customer Reviews - SEOULSKIN (PREMIUM ENGLISH FOCUS):
+               - MAJORITY (12 reviews) should be in premium English with sophisticated tone
+               - MINORITY (3 reviews) can include light Hinglish for authenticity
+               - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
+               - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+               - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+               - GENDER DISTRIBUTION (UNISEX): 12 female reviews + 2 male reviews
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+            else:
+                review_language_instruction = """15 Customer Reviews - SEOULSKIN (PREMIUM ENGLISH FOCUS):
                - MAJORITY (10-12 reviews) should be in premium English with sophisticated tone
                - MINORITY (3-5 reviews) can include light Hinglish for authenticity
                - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
                - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+               - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+        elif is_urban_yog:
+            if is_unisex:
+                review_language_instruction = """15 Customer Reviews - URBAN YOG:
+               - 10 reviews in Hinglish with some Gen Z words but simple
+               - 5 reviews in English (premium tone)
+               - GENDER DISTRIBUTION (UNISEX): 13 female reviews + 2 male reviews
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+            else:
+                review_language_instruction = """15 Customer Reviews - URBAN YOG:
+               - 10 reviews in Hinglish with some Gen Z words but simple
+               - 5 reviews in English (premium tone)
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+        elif is_makemeebold:
+            if is_unisex:
+                review_language_instruction = """15 Customer Reviews - MAKEMEEBOLD:
+               - 10 reviews in English but in simple tone
+               - 5 reviews in Hinglish with English words
+               - GENDER DISTRIBUTION (UNISEX): 13 female reviews + 2 male reviews
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+            else:
+                review_language_instruction = """15 Customer Reviews - MAKEMEEBOLD:
+               - 10 reviews in English but in simple tone
+               - 5 reviews in Hinglish with English words
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
+               - Use common Indian names (first + last name)
+               - Format: Name – Review (no markdown, just plain text)"""
+        elif is_urban_gabru:
+            # Urban Gabru is men's brand - no unisex consideration
+            review_language_instruction = """15 Customer Reviews - URBAN GABRU (MEN'S BRAND):
+               - 10 reviews in Hinglish and simple
+               - 5 reviews in English
+               - All reviews from male customers (use male names)
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
                - Use common Indian names (first + last name)
                - Format: Name – Review (no markdown, just plain text)"""
         else:
@@ -473,6 +919,9 @@ if uploaded_file:
                - First 2 reviews: Long story-style testimonials (premium English with Hindi words)
                - Remaining 13 reviews: Short casual Hinglish reviews
                - Mix casual Hinglish with some premium English reviews
+               - Include 1 review mentioning product as a gifting option
+               - Include comparisons like "better than [old product/technology]"
+               - Mention relatable problems: "This helps because I have [common problem]"
                - Use common Indian names (first + last name)
                - Format: Name – Review (no markdown, just plain text)"""
         
@@ -482,15 +931,23 @@ if uploaded_file:
             Generate the following website content in a structured format:
 
             1. 7 Bullet Points – focus on customer benefits, pain points, or product uniqueness.
-            2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words. 
-               IMPORTANT: After the description, add "What's in the Box" section with items listed as bullet points (one per line with dash), 
-               followed by "Warranty Information" section.
+            2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words.
             3. USP Points – concise value-driven phrases (2–4 words each).
-            4. What do you get – brief explanation of what comes in the package.
-            5. How to use – easy-to-follow, friendly, step-by-step instructions.
-            6. 6 FAQs – with short, helpful answers.
-            7. {review_language_instruction}
-            8. Brand & Contact Information – Include brand ownership, country of origin, contact details.
+            4. What's in the Box – List items with format: -[Quantity] [Item Name] ([Details if applicable]), keep simple, do not exaggerate.
+            5. Warranty Information – Include warranty details clearly.
+            6. How to use – easy-to-follow, friendly, step-by-step instructions.
+            7. 6 FAQs – ELECTRONICS FORMAT:
+               Focus on practical questions that genuinely help customers:
+               - Usage limitations (e.g., "Can I use it on my face?")
+               - Water resistance/waterproof rating
+               - Battery life and charging time
+               - What's included in the package
+               - Suitability for different needs
+               - Warranty information
+               FORMAT: Q1: [Question] / A: [Concise answer with specific details like ratings, numbers, specifications]
+               Keep answers under 150 characters and be specific with technical details.
+            8. {review_language_instruction}
+            9. Brand & Contact Information – Include brand ownership, country of origin, contact details.
             
             IMPORTANT: Provide ALL content in plain text format only. Do NOT use markdown formatting such as:
             - No ** for bold text
@@ -498,9 +955,11 @@ if uploaded_file:
             - No *** or ___ for dividers
             - No markdown bullet points with *
             - Use simple text formatting only with clear section labels
+            
+            IMPORTANT: Strictly avoid exaggerated exclamations/expressions in the description.
 
             Product Name: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {brand_name}
             USPs / Features: {product_info.get('USPs Front', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
@@ -514,16 +973,16 @@ if uploaded_file:
             Warranty: {product_info.get('Warranty', 'N/A')}
         """
         else:
-            # Beauty products - original format without Box Includes and Warranty
+            # Beauty products - with "How Much Do You Get?" instead of "What's in the Box?"
             full_web_prompt = f"""
             Generate the following website content in a structured format:
 
             1. 7 Bullet Points – focus on customer benefits, pain points, or product uniqueness.
             2. Description – 2 paragraphs, warm and benefit-driven tone, max 400 words.
             3. USP Points – concise value-driven phrases (2–4 words each).
-            4. What do you get – brief explanation of what comes in the package.
+            4. How Much Do You Get? – Describe the net quantity/volume (ml, g, units, patches, etc.) clearly and simply.
             5. How to use – easy-to-follow, friendly, step-by-step instructions.
-            6. 6 FAQs – with short, helpful answers.
+            6. 6 FAQs – with short, helpful answers from user perspectives.
             7. {review_language_instruction}
             8. Brand & Contact Information – Include brand ownership, country of origin, contact details.
             
@@ -533,13 +992,16 @@ if uploaded_file:
             - No *** or ___ for dividers
             - No markdown bullet points with *
             - Use simple text formatting only with clear section labels
+            
+            IMPORTANT: Strictly avoid exaggerated exclamations/expressions in the description.
 
             Product Name: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {brand_name}
             USPs / Features: {product_info.get('USPs Front', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
             How to Use: {product_info.get('How to use it?', 'N/A')}
+            Net Quantity/Weight: {product_info.get('Net Qty.', 'N/A')}
             MRP: {product_info.get('MRP (Incl. of all taxes)', 'N/A')}
             Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
             Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
@@ -569,20 +1031,27 @@ if uploaded_file:
         category = product_info.get('Category', 'Beauty')
         is_electronics = 'Electronics' in str(category)
         
+        # Normalize brand name for consistency
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        normalized_brand_web = normalize_brand_name(brand_name_raw) or selected_brand or product_info.get('Brand Name', 'N/A')
+        
         if is_electronics:
             # Electronics-specific description with Box Includes and Warranty
             web_desc_prompt = f"""
-            Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with two paragraphs.
+            Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with three paragraphs.
             Include brand credibility information naturally in the content.
+            Incorporate relevant keywords and highlight the product's USPs throughout the description.
             
             After the main description, add two additional sections:
             1. "What's in the Box" - List all items included as bullet points (one item per line with a dash)
             2. "Warranty Information" - Include warranty details
             
             Format the box contents as simple bullet points (use - for each item, one per line).
+            
+            IMPORTANT: Strictly avoid exaggerated exclamations/expressions in the description.
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand_web}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
@@ -592,16 +1061,22 @@ if uploaded_file:
             Warranty: {product_info.get('Warranty', 'N/A')}
         """
         else:
-            # Beauty products - original format
+            # Beauty products - include "How Much Do You Get?" section
             web_desc_prompt = f"""
-            Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with two paragraphs.
+            Write a product description for the website (max 400 words). Use a warm, benefit-oriented tone and structure it with three paragraphs.
             Include brand credibility information naturally in the content.
+            Incorporate relevant keywords and highlight the product's USPs throughout the description.
+            
+            After the paragraphs, add a section titled "How Much Do You Get?" that describes the net quantity/volume included (e.g., "60 patches (30 pairs)", "50ml", "100g"). Use the Net Quantity/Weight field below.
+            
+            IMPORTANT: Strictly avoid exaggerated exclamations/expressions in the description.
 
             Product: {product_info.get('Product Name', 'N/A')}
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand_web}
             USPs: {product_info.get('USPs Front', 'N/A')}
             Claims: {product_info.get('Claims', 'N/A')}
             Ingredients: {product_info.get('Ingredients', 'N/A')}
+            Net Quantity/Weight: {product_info.get('Net Qty.', 'N/A')}
             Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
             Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
         """
@@ -613,6 +1088,10 @@ if uploaded_file:
         usp_prompt = f"""
             Generate exactly 6 concise USPs for a product listing.
             Guidelines:
+            - PRIORITY ORDERING: If there are any interchangeable heads or new type of technology, these MUST be placed on top (position 1)
+            - Focus on the most important USPs first
+            - Order USPs by priority: Most important → Least important
+            - The first 2-3 USPs should be the strongest differentiators
             - Each USP must be a short, impactful phrase of 2–4 words.
             - Do not include full sentences.
             - Do not include explanations.
@@ -628,30 +1107,159 @@ if uploaded_file:
     text_box("USP", 'usp', 100)
 
     st.session_state.setdefault('what_you_get', '')
-    if st.button("Generate 'What Do You Get'"):
-        get_prompt = f"""
-            Describe what the customer will receive when they purchase the product. Mention packaging, quantity, and any bonuses.
+    
+    # Check category to determine which section to show
+    category = product_info.get('Category', 'Beauty')
+    is_electronics = 'Electronics' in str(category)
+    
+    if is_electronics:
+        # Electronics: "What's in the Box?" section
+        if st.button("Generate 'What's in the Box?'"):
+            get_prompt = f"""
+                Describe what the customer will receive when they purchase the product.
+                
+                IMPORTANT: Use the title "What's in the Box?" (not "What Do You Get?")
+                
+                FORMAT REQUIREMENTS:
+                - List each item on a separate line starting with a dash (-)
+                - Start each item with quantity number (e.g., -1, -5, -2)
+                - Format: -[Quantity] [Item Name] ([Color/Detail if applicable]), keep simple, do not exaggerate.
+                - Example format:
+                  -1 Auto Electric Bath Brush (Off-White)
+                  -5 Brush Heads: Long Bristle, Short Bristle, Silicone, Scrub, Gauze
+                  -1 Magnetic USB Charging Cable
+                  -1 Wall-Mount Hook with Adhesive Tape
+                  -1 User Manual
+                  -1 Warranty Card
 
-            Product: {product_info.get('Product Name', 'N/A')}
-            Net Quantity: {product_info.get('Net Qty.', 'N/A')}
-        """
-        st.session_state['what_you_get'] = generate_section("What Do You Get", get_prompt)
-    text_box("What Do You Get", 'what_you_get', 100)
+                Product: {product_info.get('Product Name', 'N/A')}
+                Net Quantity: {product_info.get('Net Qty.', 'N/A')}
+                Box Includes: {product_info.get('Box Includes', 'N/A')}
+            """
+            st.session_state['what_you_get'] = generate_section("What's in the Box?", get_prompt)
+        text_box("What's in the Box?", 'what_you_get', 100)
+    else:
+        # Beauty: "How Much Do You Get?" section
+        if st.button("Generate 'How Much Do You Get?'"):
+            get_prompt = f"""
+                Describe the quantity/volume that the customer will receive when they purchase the product.
+                
+                IMPORTANT: Use the title "How Much Do You Get?" (not "What Do You Get?")
+                
+                FORMAT REQUIREMENTS:
+                - Focus on the net quantity/weight/volume of the product
+                - Be clear and specific about measurements (ml, g, units, patches, etc.)
+                - Mention if it's a single unit or multiple units
+                - Keep it simple and straightforward
+                - Example formats:
+                  "You get 60 hydrogel under-eye patches (30 pairs) in each jar."
+                  "This bottle contains 50ml of serum for daily use."
+                  "Each pack includes 100g of face cream."
+
+                Product: {product_info.get('Product Name', 'N/A')}
+                Net Quantity/Weight: {product_info.get('Net Qty.', 'N/A')}
+            """
+            st.session_state['what_you_get'] = generate_section("How Much Do You Get?", get_prompt)
+        text_box("How Much Do You Get?", 'what_you_get', 100)
 
     st.session_state.setdefault('how_to_use', '')
     if st.button("Generate 'How to Use'"):
-        how_to_prompt = f"""
-            Describe how to use this product step-by-step in a friendly, instructional tone.
+        # Check product category for category-specific format
+        category = product_info.get('Category', 'Beauty')
+        is_electronics = 'Electronics' in str(category)
+        
+        if is_electronics:
+            # Electronics - use specific numbered format with device-focused instructions
+            how_to_prompt = f"""
+            Describe how to use this electronics product step-by-step in a friendly, instructional tone.
+            
+            FORMAT REQUIREMENTS (ELECTRONICS):
+            - Use numbered steps (1, 2, 3, etc.)
+            - Each step should be clear, concise, and actionable
+            - Start each step with a verb (action word)
+            - Keep each step to one sentence
+            - Focus on device operation, power/charging, usage, maintenance
+            - Example format:
+              1. Select and attach your preferred brush head.
+              2. Long press the power button to turn ON (choose speed as needed).
+              3. Move in gentle circular motions on skin.
+              4. Detach & rinse the brush head after each use.
+              5. Dry & store on the wall-mount holder.
+              6. Recharge using the magnetic 2-pin cable when required.
 
             Product: {product_info.get('Product Name', 'N/A')}
             Instructions: {product_info.get('How to use it?', 'N/A')}
-        """
+            """
+        else:
+            # Beauty - use data from KLD sheet "How to use it?" column
+            how_to_prompt = f"""
+            Create clear, step-by-step usage instructions for this beauty product based on the provided instructions from the product sheet.
+            
+            FORMAT REQUIREMENTS (BEAUTY):
+            - Use numbered steps (1, 2, 3, etc.)
+            - Each step should be clear, concise, and actionable
+            - Start each step with a verb (action word)
+            - Keep each step to one sentence
+            - Focus on application method, timing, frequency, and results
+            - Base the content strictly on the "How to use it?" data provided below
+
+            Product: {product_info.get('Product Name', 'N/A')}
+            Instructions from sheet: {product_info.get('How to use it?', 'N/A')}
+            """
+        
         st.session_state['how_to_use'] = generate_section("How to Use", how_to_prompt)
     text_box("How to Use This", 'how_to_use', 100)
 
     st.session_state.setdefault('faqs', '')
     if st.button("Generate FAQs"):
-        faqs_prompt = f"""
+        # Check product category for electronics-specific FAQ format
+        category = product_info.get('Category', 'Beauty')
+        is_electronics = 'Electronics' in str(category)
+        
+        if is_electronics:
+            # Electronics-specific FAQ format with practical questions
+            faqs_prompt = f"""
+            Write 6 frequently asked questions and concise answers for this electronics product listing.
+            
+            IMPORTANT - ELECTRONICS FAQ FORMAT:
+            Use this Q&A format with questions that genuinely help customers make informed decisions.
+            
+            Focus on these types of practical questions:
+            - Usage limitations (e.g., "Can I use it on my face?")
+            - Water resistance/waterproof rating
+            - Battery life and charging time
+            - What's included in the package
+            - Suitability for different needs (e.g., sensitive skin, hair types)
+            - Warranty information
+            - Power specifications
+            - Compatibility
+            - Maintenance and care
+            
+            FORMAT:
+            Q1: [Question]
+            A: [Concise answer - be specific with details like ratings, numbers, specifications]
+            
+            EXAMPLE:
+            Q1: Can I use it on my face?
+            A: No, this brush is designed for body and back use only.
+            Q2: Is it waterproof?
+            A: Yes, it has an IPX7 waterproof rating. Safe for shower use but do not submerge the main unit.
+            
+            Guidelines:
+            - Keep answers under 150 characters
+            - Be specific with technical details (ratings, times, quantities)
+            - Use clear, customer-friendly language
+            - Do not mention price, promotions, or other brands
+
+            Product: {product_info.get('Product Name', 'N/A')}
+            Key Features: {product_info.get('USPs Front', 'N/A')}
+            How to Use: {product_info.get('How to use it?', 'N/A')}
+            Box Includes: {product_info.get('Box Includes', 'N/A')}
+            Warranty: {product_info.get('Warranty', 'N/A')}
+        """
+        else:
+            # Beauty products - original FAQ format
+            faqs_prompt = f"""
             Write 6 frequently asked questions and concise answers for this Amazon product listing.
             Guidelines:
             - Do NOT include questions about certifications, result timelines, or return/refund policies.
@@ -673,18 +1281,92 @@ if uploaded_file:
 
     st.session_state.setdefault('reviews', '')
     if st.button("Generate Reviews"):
-        # Check if brand is Seoulskin for language preference
-        brand_name = product_info.get('Brand Name', '').strip()
-        is_seoulskin = 'seoulskin' in brand_name.lower()
+        # Normalize brand name for consistent detection
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        brand_name = normalize_brand_name(brand_name_raw) or selected_brand
         
+        # Check brand using normalized name
+        is_seoulskin = brand_name == 'Seoulskin'
+        is_urban_gabru = brand_name == 'Urban Gabru'
+        is_urban_yog = brand_name == 'Urban Yog'
+        is_makemeebold = brand_name == 'MakeMeeBold'
+        
+        # Check if product is unisex from 'Ideal For (Gender)' field
+        gender_field = product_info.get('Ideal For (Gender)', '').lower()
+        is_unisex = 'unisex' in gender_field or ('men' in gender_field and 'women' in gender_field) or ('male' in gender_field and 'female' in gender_field)
+        
+        # Determine language distribution based on brand
         if is_seoulskin:
+            if is_unisex:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (SEOULSKIN - PREMIUM ENGLISH FOCUS):
+                - MAJORITY (12 reviews) should be in premium English with sophisticated tone
+                - MINORITY (3 reviews) can include light Hinglish for authenticity
+                - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
+                - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+                - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+                
+                GENDER DISTRIBUTION (UNISEX PRODUCT):
+                - 12 reviews from female customers (use female names)
+                - 2 reviews from male customers (use male names)
+                - 1 review mentioning product as a gifting option
+                """
+            else:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (SEOULSKIN - PREMIUM ENGLISH FOCUS):
+                - MAJORITY (10-12 reviews) should be in premium English with sophisticated tone
+                - MINORITY (3-5 reviews) can include light Hinglish for authenticity
+                - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
+                - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
+                - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+                - 1 review mentioning product as a gifting option
+                """
+        elif is_urban_yog:
+            if is_unisex:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (URBAN YOG):
+                - 10 reviews in Hinglish with some Gen Z words but simple
+                - 5 reviews in English (premium tone)
+                
+                GENDER DISTRIBUTION (UNISEX PRODUCT):
+                - 13 reviews from female customers (use female names)
+                - 2 reviews from male customers (use male names)
+                - 1 review mentioning product as a gifting option
+                """
+            else:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (URBAN YOG):
+                - 10 reviews in Hinglish with some Gen Z words but simple
+                - 5 reviews in English (premium tone)
+                - 1 review mentioning product as a gifting option
+                """
+        elif is_makemeebold:
+            if is_unisex:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (MAKEMEEBOLD):
+                - 10 reviews in English but in simple tone
+                - 5 reviews in Hinglish with English words
+                
+                GENDER DISTRIBUTION (UNISEX PRODUCT):
+                - 13 reviews from female customers (use female names)
+                - 2 reviews from male customers (use male names)
+                - 1 review mentioning product as a gifting option
+                """
+            else:
+                language_instruction = """
+                LANGUAGE & STYLE REQUIREMENTS (MAKEMEEBOLD):
+                - 10 reviews in English but in simple tone
+                - 5 reviews in Hinglish with English words
+                - 1 review mentioning product as a gifting option
+                """
+        elif is_urban_gabru:
+            # Urban Gabru is men's brand - no unisex consideration
             language_instruction = """
-            LANGUAGE & STYLE REQUIREMENTS (SEOULSKIN - PREMIUM ENGLISH FOCUS):
-            - MAJORITY (10-12 reviews) should be in premium English with sophisticated tone
-            - MINORITY (3-5 reviews) can include light Hinglish for authenticity
-            - English reviews should emphasize K-beauty, innovation, luxury, premium skincare
-            - Keep Hinglish reviews minimal and subtle (e.g., "bohot acha", "mujhe pasand aaya")
-            - Focus on premium vocabulary: "radiant", "luminous", "transformative", "innovative"
+            LANGUAGE & STYLE REQUIREMENTS (URBAN GABRU - MEN'S BRAND):
+            - 10 reviews in Hinglish and simple
+            - 5 reviews in English
+            - All reviews from male customers (use male names)
+            - 1 review mentioning product as a gifting option
             """
         else:
             language_instruction = """
@@ -694,6 +1376,7 @@ if uploaded_file:
             - Hindi words should be written in Roman script (Hinglish)
             - Mix both English and Hindi naturally in the same sentence
             - Use common phrases like: "mujhe pasand aaya", "bohot acha h", "thoda zyada", "ekdum fresh"
+            - 1 review mentioning product as a gifting option
             """
         
         review_prompt = f"""
@@ -706,6 +1389,13 @@ if uploaded_file:
             - Remaining 13 reviews: Short reviews highlighting different aspects
             - All reviewer names should be common Indian names (first name + last name)
             
+            REVIEW CONTENT GUIDELINES:
+            - Include answers/benefits that customers generally want to hear
+            - Clear doubts and highlight product benefits
+            - Use comparisons like "better than [old product/old technology]"
+            - Mention relatable problems like "This product really helps because I have [common related problem]"
+            - Make reviews authentic and helpful for potential buyers
+            
             EXAMPLES OF HINGLISH STYLE TO FOLLOW:
             - "Ye eye patches bohot ache hai, ekdum cooling effect deta h aur eyes fresh lagti h"
             - "First time use kiya aur dark circles thode light lag rahe h, mujhe acha laga ye product"
@@ -714,6 +1404,7 @@ if uploaded_file:
             - "The texture, the packaging, the results—everything about these eye patches screams luxury."
             - "pehli baar try kiya aur accha laga, mujhe lagta h regular use se aur best result milega"
             - "thanda thanda lagta h lagane ke baad, mujhe toh ye bohot pasand aaya"
+            - "Gifted this to my sister and she absolutely loved it!"
             
             TONE VARIATIONS:
             - Mix casual Hinglish reviews with some premium English reviews
@@ -723,12 +1414,19 @@ if uploaded_file:
             IMPORTANT: Provide the output in plain text format only. Do NOT use markdown formatting like **, __, or ###. Just use simple text with reviewer name followed by their review separated by " – ".
 
             Product: {product_info.get('Product Name', 'N/A')}
+            Brand: {brand_name}
+            Target Audience: {product_info.get('Target Audience', 'N/A')}
+            Ideal For (Gender): {product_info.get('Ideal For (Gender)', 'N/A')}
         """
         st.session_state['reviews'] = generate_section("Reviews", review_prompt)
     text_box("Customer Reviews", 'reviews', 300)
 
     st.session_state.setdefault('brand_info', '')
     if st.button("Generate Brand & Contact Info"):
+        # Normalize brand name for consistency
+        brand_name_raw = product_info.get('Brand Name', '').strip()
+        normalized_brand_info = normalize_brand_name(brand_name_raw) or selected_brand or product_info.get('Brand Name', 'N/A')
+        
         brand_info_prompt = f"""
             Generate a professional brand and contact information section for the website footer. 
             Format it in a clean, easy-to-read structure suitable for a website.
@@ -740,7 +1438,7 @@ if uploaded_file:
             
             Make it concise, professional, and customer-friendly.
 
-            Brand: {product_info.get('Brand Name', 'N/A')}
+            Brand: {normalized_brand_info}
             Brand Owned & Marketed By: {product_info.get('Brand Owned & Marketed By', 'N/A')}
             Country of Origin: {product_info.get('Country Of Origin', 'N/A')}
             Email: {product_info.get('Email', 'N/A')}
@@ -768,7 +1466,7 @@ if uploaded_file:
                 ('Website Bullet Points', 'web_bullets'),
                 ('Website Description', 'web_description'),
                 ('USP', 'usp'),
-                ('What Do You Get', 'what_you_get'),
+                ("What's in the Box?", 'what_you_get'),
                 ('How to Use', 'how_to_use'),
                 ('FAQs', 'faqs'),
                 ('Customer Reviews', 'reviews'),
@@ -798,6 +1496,9 @@ if uploaded_file:
     if st.button("🧹 Clear All"):
         for key in ['title', 'bullets', 'description', 'shopify', 'hero', 'a_plus', 'web_bullets', 'web_description', 'usp', 'what_you_get', 'how_to_use', 'faqs', 'reviews', 'brand_info', 'web_full']:
             st.session_state[key] = ''
+        # Clear SEO keywords data
+        st.session_state['seo_keywords_data'] = []
+        st.session_state['seo_keywords_text'] = ""
         st.success("✅ All content cleared!")
         st.rerun()
 
